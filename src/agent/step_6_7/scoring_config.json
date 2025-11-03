@@ -1,0 +1,32 @@
+{
+  "detection_confidence_weights": {
+    "evidence_completeness": 0.30,
+    "deficiency_count": 0.20,
+    "field_specificity": 0.20,
+    "evidence_type": 0.20,
+    "reasoning_quality": 0.10
+  },
+  "priority_score_weights": {
+    "severity": 0.40,
+    "impact": 0.30,
+    "urgency": 0.20,
+    "complexity": 0.10
+  },
+  "evidence_type_scores": {
+    "wrong_value": 0.9,
+    "invalid_format": 0.85,
+    "missing_required": 0.6,
+    "empty_array": 0.5,
+    "unclear": 0.3
+  },
+  "evidence_type_keywords": {
+    "missing": ["empty", "missing", "not found", "not present", "absent", "null", "[]"],
+    "wrong": ["invalid", "incorrect", "mismatch", "does not match", "conflicting", "wrong"]
+  },
+  "deficiency_count_scores": {
+    "1": 0.5,
+    "2": 0.8,
+    "3+": 1.0
+  }
+}
+
