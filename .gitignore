@@ -55,6 +55,9 @@ Thumbs.db
 *_output.json
 langgraph_output_*.json
 
+# Test inputs and outputs
+test/*_input.json
+test/*_output.json
+
 # CSV data cleanup
 data_cleanup/
-schema/

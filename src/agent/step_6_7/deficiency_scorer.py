@@ -7,12 +7,95 @@ to rank and return top N deficiencies.
 
 import json
 import os
+import re
 from typing import Dict, Any, List, Optional
 from anthropic import Anthropic
 from dotenv import load_dotenv
 
 from confidence_calculator import calculate_detection_confidence, load_config
 from priority_evaluator import evaluate_priority
+
+
+def extract_relevant_documents(actionable_instruction: str, related_documents: str) -> str:
+    """
+    Extract relevant documents from related_documents based on keywords in actionable_instruction.
+    
+    Args:
+        actionable_instruction: The actionable instruction text (e.g., "Provide K-1 or CPA letter")
+        related_documents: Comma-separated list of related documents
+        
+    Returns:
+        Filtered comma-separated list of documents that match the instruction
+    """
+    if not actionable_instruction or not related_documents:
+        return related_documents
+    
+    # Handle special metadata markers that indicate universal conditions
+    related_lower = related_documents.lower().strip()
+    if related_lower in ['all docs pass through', 'all documents', 'all docs', 'universal']:
+        # For universal conditions, extract document type from actionable instruction
+        # e.g., "Upload bank statements" -> "Bank Statement"
+        instruction_lower = actionable_instruction.lower()
+        
+        # Map common instruction keywords to document types
+        doc_type_mapping = {
+            'bank statement': 'Business Bank Statement, Personal Bank Statement',
+            'tax return': '1040 Personal Tax Return, 1120 Corporate Tax Return, Form 1120S Scorp, Form 1065',
+            'paystub': 'Paystub, Pay Stub',
+            'w-2': 'W-2 Form, W2',
+            'cpa letter': 'CPA Letter for Self-Employment, CPA Letter for Use of Business Funds',
+            'profit and loss': 'Profit and Loss Statement, P&L Statement',
+            'balance sheet': 'Balance Sheet',
+            'credit report': 'Credit Report',
+            'appraisal': 'Appraisal Report',
+            'title': 'Title Report, Preliminary Title',
+        }
+        
+        # Find matching document types
+        for keyword, doc_types in doc_type_mapping.items():
+            if keyword in instruction_lower:
+                return doc_types
+        
+        # If no specific mapping found, return a generic indicator
+        return 'See actionable instruction for required documents'
+    
+    # Parse related documents
+    docs_list = [doc.strip() for doc in related_documents.split(',')]
+    
+    # Extract keywords from actionable instruction
+    # Remove common words and focus on document-type keywords
+    instruction_lower = actionable_instruction.lower()
+    
+    # Common document type keywords to look for
+    keywords = []
+    
+    # Extract specific document mentions
+    # Pattern: look for capitalized words, numbers, and common doc terms
+    potential_keywords = re.findall(r'\b[A-Z0-9][A-Za-z0-9\-]*\b', actionable_instruction)
+    keywords.extend([kw.lower() for kw in potential_keywords])
+    
+    # Add common document type words from instruction
+    doc_types = ['tax', 'return', 'letter', 'cpa', 'k-1', 'k1', 'schedule', 'form', 
+                 'statement', 'report', 'agreement', 'certificate', 'paystub', 'w-2', 'w2',
+                 '1099', '1040', '1065', '1120', 'articles', 'operating', 'partnership',
+                 'incorporation', 'organization', 'bank', 'credit', 'proof', 'verification']
+    
+    for doc_type in doc_types:
+        if doc_type in instruction_lower:
+            keywords.append(doc_type)
+    
+    # Filter documents that contain any of the keywords
+    relevant_docs = []
+    for doc in docs_list:
+        doc_lower = doc.lower()
+        if any(keyword in doc_lower for keyword in keywords):
+            relevant_docs.append(doc)
+    
+    # If no matches found, return original list
+    if not relevant_docs:
+        return related_documents
+    
+    return ', '.join(relevant_docs)
 
 
 class DeficiencyScorer:
@@ -171,6 +254,11 @@ class DeficiencyScorer:
             print(f"    - Complexity: {priority_result['complexity']:.3f}")
             print(f"  Explanation: {priority_result.get('explanation', '')[:80]}...")
         
+        # Extract actionable documents from related documents
+        related_docs = deficiency_result.get("related_documents", "")
+        actionable_inst = deficiency_result.get("actionable_instruction", "")
+        actionable_docs = extract_relevant_documents(actionable_inst, related_docs)
+        
         # Combine into output format
         return {
             "condition_id": deficiency_result.get("condition_id", ""),
@@ -185,8 +273,11 @@ class DeficiencyScorer:
                 "complexity": priority_result["complexity"],
                 "explanation": priority_result.get("explanation", "")
             },
-            "related_documents": deficiency_result.get("related_documents", ""),
-            "actionable_instruction": deficiency_result.get("actionable_instruction", ""),
+            "related_documents": related_docs,
+            "actionable_documents": actionable_docs,
+            "actionable_instruction": actionable_inst,
+            "documents_checked": deficiency_result.get("documents_checked", []),
+            "satisfied_by": deficiency_result.get("satisfied_by"),
             "original_deficiency": deficiency_result
         }
     

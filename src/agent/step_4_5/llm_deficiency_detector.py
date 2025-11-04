@@ -113,7 +113,9 @@ Always return valid JSON with this exact structure:
       ],
       "reasoning": "brief explanation of evaluation",
       "checked_fields": ["list", "of", "fields", "examined"],
-      "actionable_instruction": "Simple, clear action in plain language that a loan processor can take to resolve this deficiency. Use imperative verbs. Examples: 'Upload signed tax return', 'Obtain signature from borrower', 'Request Schedule C attachment', 'Provide proof of ownership percentage'"
+      "actionable_instruction": "Simple, clear action in plain language that a loan processor can take to resolve this deficiency. Use imperative verbs. Examples: 'Upload signed tax return', 'Obtain signature from borrower', 'Request Schedule C attachment', 'Provide proof of ownership percentage'",
+      "documents_checked": ["Document Classification 1", "Document Classification 2"],
+      "satisfied_by": "Document Classification Name that satisfied the requirement (or null if deficient)"
     }
   ]
 }
@@ -125,24 +127,35 @@ IMPORTANT: The "actionable_instruction" field must be:
 - Specific to what document or action is needed
 - Immediately actionable by a loan processor
 
+IMPORTANT: The "documents_checked" field must be:
+- An array of document classification strings that were reviewed for this condition
+- Include all documents examined, even if they didn't satisfy the requirement
+
+IMPORTANT: The "satisfied_by" field must be:
+- A string containing the document classification that satisfied the requirement (for compliant/satisfied status)
+- null if the status is deficient or not_applicable
+- The specific document name, not a list
+
 NOTE: Do not provide confidence scores. Focus only on clear deficiency detection.
 """
         return prompt
     
     def check_document(
         self, 
-        document_data: Dict[str, Any], 
+        document_data, 
         condition_ids: List[str],
-        max_tokens: int = 4000,
+        max_tokens: int = 8000,  # Increased from 4000 to handle more conditions
         additional_context: Optional[List[Dict[str, Any]]] = None,
         loan_program: Optional[str] = None,
         borrower_info: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Check a document against specific conditions.
+        Check document(s) against specific conditions.
         
         Args:
-            document_data: Document JSON with extracted data (from your ETL/parsing)
+            document_data: Either a single document dict or list of document dicts
+                          Single: {classification: str, extracted_entities: dict, ...}
+                          Multiple: [{classification: str, extracted_entities: dict}, ...]
             condition_ids: List of condition IDs (titles) to check
             max_tokens: Maximum tokens for response
             additional_context: Optional context from step 3 (ranked requirements with connected nodes)
@@ -152,6 +165,9 @@ NOTE: Do not provide confidence scores. Focus only on clear deficiency detection
         Returns:
             Dict with evaluation results for each condition
         """
+        
+        # Detect if we have single document or multiple documents
+        is_multi_doc = isinstance(document_data, list)
         
         # Build user prompt with loan program and borrower info context
         user_prompt = ""
@@ -194,14 +210,33 @@ NOTE: Do not provide confidence scores. Focus only on clear deficiency detection
             
             user_prompt += "\nIMPORTANT: Only select and evaluate conditions that relate to the loan program that the borrower is eligible for. Consider the borrower's type and context when evaluating requirements.\n\n"
         
-        # Add conditions and document data
-        user_prompt += f"""Please evaluate this loan document against the following conditions:
+        # Add conditions
+        user_prompt += f"""Please evaluate the submitted document(s) against the following conditions:
 
 CONDITIONS TO CHECK: {', '.join(condition_ids)}
 
-DOCUMENT DATA:
-{json.dumps(document_data, indent=2)}
 """
+        
+        # Format document data based on type
+        if is_multi_doc:
+            user_prompt += "SUBMITTED DOCUMENTS:\n\n"
+            for idx, doc in enumerate(document_data, 1):
+                classification = doc.get('classification', f'Document {idx}')
+                extracted_entities = doc.get('extracted_entities', {})
+                user_prompt += f"DOCUMENT {idx}: {classification}\n"
+                user_prompt += f"Extracted Data:\n{json.dumps(extracted_entities, indent=2)}\n\n"
+            
+            user_prompt += """IMPORTANT FOR MULTI-DOCUMENT EVALUATION:
+- Consider ALL documents collectively when evaluating each condition
+- A requirement missing in one document may be satisfied by another document
+- If a condition requires information found in any of the submitted documents, mark it as compliant
+- Specify which document(s) satisfied the requirement in your reasoning
+- In the "documents_checked" field, list all document classifications reviewed
+- In the "satisfied_by" field, specify which document satisfied the requirement (or null if deficient)
+
+"""
+        else:
+            user_prompt += f"DOCUMENT DATA:\n{json.dumps(document_data, indent=2)}\n\n"
         
         # Add additional context from step 3 if available
         if additional_context:
@@ -256,9 +291,11 @@ For each condition listed above:
 4. Provide clear reasoning for your determination
 5. Consider the additional context provided when making your determination
 6. Provide a simple, actionable instruction for resolving each deficiency (e.g., "Upload signed tax return", "Obtain CPA letter showing 25% ownership")
+7. Include "documents_checked" array listing all document classifications reviewed for this condition
+8. Include "satisfied_by" field (string or null) specifying which document satisfied the requirement if compliant, or null if deficient
 
 Return the evaluation as JSON following the response format specified in the system prompt.
-IMPORTANT: Include the "actionable_instruction" field for each deficient condition.
+IMPORTANT: Include the "actionable_instruction", "documents_checked", and "satisfied_by" fields for each condition.
 Do NOT include confidence scores - focus only on clear deficiency detection.
 """
         
@@ -320,12 +357,31 @@ Do NOT include confidence scores - focus only on clear deficiency detection.
             return result
             
         except json.JSONDecodeError as e:
+            print(f"\n❌ ERROR: Failed to parse LLM response as JSON")
+            print(f"Exception: {str(e)}")
+            print(f"Response length: {len(response_text)} characters")
+            print(f"Raw response (first 500 chars): {response_text[:500]}")
+            print(f"Raw response (last 500 chars): {response_text[-500:]}")
+            
+            # Try to identify if response was truncated
+            if not response_text.rstrip().endswith('}'):
+                print(f"⚠ WARNING: Response appears to be truncated (doesn't end with '}}' )")
+                print(f"  This usually means max_tokens is too low for the number of conditions being checked.")
+                print(f"  Current conditions: {len(condition_ids)}")
+                print(f"  Suggestion: Reduce number of conditions or increase max_tokens parameter")
+            
             return {
                 "error": "Failed to parse LLM response as JSON",
                 "raw_response": response_text,
-                "exception": str(e)
+                "exception": str(e),
+                "response_length": len(response_text),
+                "appears_truncated": not response_text.rstrip().endswith('}')
             }
         except Exception as e:
+            print(f"\n❌ ERROR: API call failed")
+            print(f"Exception: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return {
                 "error": "API call failed",
                 "exception": str(e)

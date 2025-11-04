@@ -49,8 +49,7 @@ class PipelineState(TypedDict):
     
     # Input data
     input_file: str
-    classification: str
-    extracted_entities: Dict[str, Any]
+    documents: List[Dict[str, Any]]  # Array of {classification: str, extracted_entities: dict}
     loan_program: str
     borrower_info: Dict[str, Any]
     
@@ -122,7 +121,7 @@ def log_event(state: PipelineState, step: str, event_type: str, message: str, **
 # ============================================================================
 
 def step1_get_compartments(state: PipelineState) -> PipelineState:
-    """Step 1: Get compartment labels for the document."""
+    """Step 1: Get compartment labels for all documents."""
     # Initialize state fields if not present
     if "execution_id" not in state:
         state["execution_id"] = str(uuid.uuid4())
@@ -133,37 +132,52 @@ def step1_get_compartments(state: PipelineState) -> PipelineState:
     
     step_start = time.time()
     
-    log_event(state, "STEP_1", "start", "Obtaining compartment labels")
+    log_event(state, "STEP_1", "start", "Obtaining compartment labels for all documents")
     
     try:
-        classification = state.get("classification", "")
+        documents = state.get("documents", [])
         
-        if not classification:
-            log_event(state, "STEP_1", "warning", "No classification provided in input")
+        if not documents:
+            log_event(state, "STEP_1", "warning", "No documents provided in input")
             state["compartments"] = []
             state["step1_latency"] = time.time() - step_start
             return state
         
-        # Get compartments from classification
-        compartments = get_document_category(classification)
+        # Collect compartments from all documents
+        all_compartments = set()
         
-        # Fallback: try first entity if no compartments found
-        if not compartments:
-            log_event(state, "STEP_1", "warning", f"No compartments for '{classification}', trying entities")
+        for doc in documents:
+            classification = doc.get("classification", "")
             
-            # Extract entity keywords
-            extracted_entities = state.get("extracted_entities", {})
-            entity_keywords = list(extracted_entities.keys()) if extracted_entities else []
-            if entity_keywords:
-                compartments = get_document_category(entity_keywords[0])
+            if not classification:
+                log_event(state, "STEP_1", "warning", f"Document has no classification, skipping")
+                continue
+            
+            # Get compartments from classification
+            compartments = get_document_category(classification)
+            
+            # Fallback: try first entity if no compartments found
+            if not compartments:
+                log_event(state, "STEP_1", "warning", f"No compartments for '{classification}', trying entities")
+                
+                # Extract entity keywords
+                extracted_entities = doc.get("extracted_entities", {})
+                entity_keywords = list(extracted_entities.keys()) if extracted_entities else []
+                if entity_keywords:
+                    compartments = get_document_category(entity_keywords[0])
+            
+            # Add to set (automatically deduplicates)
+            if compartments:
+                all_compartments.update(compartments)
         
-        state["compartments"] = compartments or []
+        # Convert to list
+        state["compartments"] = list(all_compartments)
         state["step1_latency"] = time.time() - step_start
         
         log_event(
             state, "STEP_1", "complete", 
-            f"Found {len(compartments)} compartment(s)",
-            compartments=compartments,
+            f"Found {len(state['compartments'])} unique compartment(s) across {len(documents)} document(s)",
+            compartments=state["compartments"],
             latency_ms=state["step1_latency"] * 1000
         )
         
@@ -180,7 +194,7 @@ def step1_get_compartments(state: PipelineState) -> PipelineState:
 # ============================================================================
 
 def step2_hard_filter(state: PipelineState) -> PipelineState:
-    """Step 2: Filter requirements by compartment and entities."""
+    """Step 2: Filter requirements by compartment and entities from all documents."""
     step_start = time.time()
     
     log_event(state, "STEP_2", "start", "Filtering requirements")
@@ -194,11 +208,9 @@ def step2_hard_filter(state: PipelineState) -> PipelineState:
             state["step2_latency"] = time.time() - step_start
             return state
         
-        # Extract entity keywords
-        entity_keywords = _extract_entity_keywords(
-            state["extracted_entities"], 
-            state["classification"]
-        )
+        # Extract entity keywords from all documents
+        documents = state.get("documents", [])
+        entity_keywords = _extract_entity_keywords_from_documents(documents)
         
         # Apply hard filter
         filtered_requirements = hard_filter(
@@ -208,6 +220,11 @@ def step2_hard_filter(state: PipelineState) -> PipelineState:
             similarity_threshold=0.3,
             verbose=state.get("verbose", False)
         )
+        
+        # Remove embeddings from requirements
+        for req in filtered_requirements:
+            if 'embedding' in req:
+                del req['embedding']
         
         state["filtered_requirements"] = filtered_requirements
         state["step2_latency"] = time.time() - step_start
@@ -232,7 +249,7 @@ def step2_hard_filter(state: PipelineState) -> PipelineState:
 # ============================================================================
 
 def step3_rank_requirements(state: PipelineState) -> PipelineState:
-    """Step 3: Rank requirements by similarity to document entities."""
+    """Step 3: Rank requirements by similarity to entities from all documents."""
     step_start = time.time()
     
     log_event(state, "STEP_3", "start", "Ranking requirements by similarity")
@@ -247,11 +264,9 @@ def step3_rank_requirements(state: PipelineState) -> PipelineState:
             state["step3_tokens"] = {}
             return state
         
-        # Extract entity keywords
-        entity_keywords = _extract_entity_keywords(
-            state["extracted_entities"],
-            state["classification"]
-        )
+        # Extract entity keywords from all documents
+        documents = state.get("documents", [])
+        entity_keywords = _extract_entity_keywords_from_documents(documents)
         
         # Rank requirements
         ranked_requirements = rank_requirements_by_similarity(
@@ -261,6 +276,18 @@ def step3_rank_requirements(state: PipelineState) -> PipelineState:
             include_connected_nodes=True,
             verbose=state.get("verbose", False)
         )
+        
+        # Remove embeddings from ranked requirements
+        for req in ranked_requirements:
+            if 'embedding' in req:
+                del req['embedding']
+            # Also remove embeddings from connected nodes if present
+            if 'connected_nodes' in req:
+                for node_type, nodes in req['connected_nodes'].items():
+                    if isinstance(nodes, list):
+                        for node in nodes:
+                            if isinstance(node, dict) and 'embedding' in node:
+                                del node['embedding']
         
         state["ranked_requirements"] = ranked_requirements
         state["step3_latency"] = time.time() - step_start
@@ -295,7 +322,7 @@ def step3_rank_requirements(state: PipelineState) -> PipelineState:
 # ============================================================================
 
 def step4_5_detect_deficiencies(state: PipelineState) -> PipelineState:
-    """Step 4/5: Detect deficiencies using LLM."""
+    """Step 4/5: Detect deficiencies using LLM across all documents."""
     step_start = time.time()
     
     log_event(state, "STEP_4_5", "start", "Detecting deficiencies with LLM")
@@ -312,23 +339,48 @@ def step4_5_detect_deficiencies(state: PipelineState) -> PipelineState:
             conditions_csv_path=conditions_csv_path
         )
         
-        # Filter conditions by classification
-        extracted_entities = state.get("extracted_entities", {})
-        document_fields = list(extracted_entities.keys()) if extracted_entities else []
-        classification = state.get("classification", "")
+        # Get all documents
+        documents = state.get("documents", [])
         
-        filtered_conditions = detector.filter_by_classification(
-            classification=classification,
-            document_fields=document_fields,
-            loan_program=state.get("loan_program")
-        )
+        if not documents:
+            log_event(state, "STEP_4_5", "warning", "No documents provided")
+            state["detection_results"] = {"results": []}
+            state["deficient_conditions"] = []
+            state["step4_5_latency"] = time.time() - step_start
+            state["step4_5_tokens"] = {}
+            return state
         
-        condition_ids = filtered_conditions['Title'].tolist()
+        # Collect all classifications and document fields from all documents
+        all_classifications = []
+        all_document_fields = set()
         
-        # Limit for cost efficiency
-        if len(condition_ids) > 100:
-            condition_ids = condition_ids[:100]
-            log_event(state, "STEP_4_5", "info", f"Limited to 100 conditions for efficiency")
+        for doc in documents:
+            classification = doc.get("classification", "")
+            if classification:
+                all_classifications.append(classification)
+            
+            extracted_entities = doc.get("extracted_entities", {})
+            if extracted_entities:
+                all_document_fields.update(extracted_entities.keys())
+        
+        # Filter conditions using all document classifications (try each and merge)
+        all_condition_ids = set()
+        for classification in all_classifications:
+            filtered_conditions = detector.filter_by_classification(
+                classification=classification,
+                document_fields=list(all_document_fields),
+                loan_program=state.get("loan_program")
+            )
+            all_condition_ids.update(filtered_conditions['Title'].tolist())
+        
+        condition_ids = list(all_condition_ids)
+        
+        # Limit for cost efficiency and API response size
+        # Note: Too many conditions can cause response truncation
+        max_conditions = 50  # Reduced from 100 to prevent token limit issues
+        if len(condition_ids) > max_conditions:
+            condition_ids = condition_ids[:max_conditions]
+            log_event(state, "STEP_4_5", "info", f"Limited to {max_conditions} conditions for efficiency")
         
         if not condition_ids:
             log_event(state, "STEP_4_5", "warning", "No conditions found")
@@ -338,16 +390,37 @@ def step4_5_detect_deficiencies(state: PipelineState) -> PipelineState:
             state["step4_5_tokens"] = {}
             return state
         
-        log_event(state, "STEP_4_5", "info", f"Checking {len(condition_ids)} conditions")
+        log_event(state, "STEP_4_5", "info", f"Checking {len(condition_ids)} conditions across {len(documents)} document(s)")
         
-        # Check document
+        # Check documents collectively
         detection_results = detector.check_document(
-            document_data=extracted_entities,
+            document_data=documents,  # Pass full documents array
             condition_ids=condition_ids,
             additional_context=state.get("ranked_requirements"),
             loan_program=state.get("loan_program"),
             borrower_info=state.get("borrower_info", {})
         )
+        
+        # Check for errors in LLM response
+        if "error" in detection_results:
+            log_event(
+                state, "STEP_4_5", "error", 
+                f"LLM call failed: {detection_results.get('error', 'Unknown error')}",
+                exception=detection_results.get('exception', ''),
+                raw_response=detection_results.get('raw_response', '')[:500]
+            )
+            state["detection_results"] = {"results": [], "error": detection_results.get("error")}
+            state["deficient_conditions"] = []
+            state["step4_5_latency"] = time.time() - step_start
+            state["step4_5_tokens"] = {
+                "model": "error",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_creation_tokens": 0,
+                "total_tokens": 0
+            }
+            return state
         
         # Extract deficient conditions
         deficient_conditions = [
@@ -529,6 +602,22 @@ def _extract_entity_keywords(extracted_entities: Dict[str, Any], classification:
     return list(set([e for e in entities if e and str(e).strip()]))
 
 
+def _extract_entity_keywords_from_documents(documents: List[Dict[str, Any]]) -> List[str]:
+    """Extract and aggregate entity keywords from all documents."""
+    all_entities = []
+    
+    for doc in documents:
+        classification = doc.get("classification", "")
+        extracted_entities = doc.get("extracted_entities", {})
+        
+        # Use the existing helper for each document
+        doc_entities = _extract_entity_keywords(extracted_entities, classification)
+        all_entities.extend(doc_entities)
+    
+    # Deduplicate and return
+    return list(set([e for e in all_entities if e and str(e).strip()]))
+
+
 # ============================================================================
 # LANGGRAPH WORKFLOW
 # ============================================================================
@@ -597,20 +686,34 @@ def run_pipeline_with_langgraph(
     with open(input_path, 'r') as f:
         input_data = json.load(f)
     
-    # Extract input fields
-    indexing_output = input_data.get('indexing_output', {})
-    classification = indexing_output.get('classification', input_data.get('classification', ''))
-    extracted_entities = indexing_output.get('extracted_entities', input_data.get('extracted_entities', {}))
+    # Extract input fields - handle both old and new formats
     loan_program = input_data.get('loan_program', '')
     borrower_info = input_data.get('borrower_info', {})
+    
+    # Check for new format (documents array) vs old format (single document)
+    if 'documents' in input_data:
+        # New format: array of documents
+        documents = input_data['documents']
+        if not documents:
+            raise ValueError("documents array is empty - at least one document is required")
+    else:
+        # Old format: single document (backward compatibility)
+        indexing_output = input_data.get('indexing_output', {})
+        classification = indexing_output.get('classification', input_data.get('classification', ''))
+        extracted_entities = indexing_output.get('extracted_entities', input_data.get('extracted_entities', {}))
+        
+        # Convert to new format
+        documents = [{
+            "classification": classification,
+            "extracted_entities": extracted_entities
+        }]
     
     # Initialize state
     initial_state: PipelineState = {
         "execution_id": str(uuid.uuid4()),
         "start_time": time.time(),
         "input_file": str(input_path),
-        "classification": classification,
-        "extracted_entities": extracted_entities,
+        "documents": documents,
         "loan_program": loan_program,
         "borrower_info": borrower_info,
         "compartments": [],
@@ -640,7 +743,9 @@ def run_pipeline_with_langgraph(
         print("🔷 LANGGRAPH PIPELINE: STEPS 1-7")
         print("="*70)
         print(f"Execution ID: {initial_state['execution_id']}")
-        print(f"Classification: {classification}")
+        print(f"Documents: {len(documents)} document(s)")
+        for idx, doc in enumerate(documents, 1):
+            print(f"  {idx}. {doc.get('classification', 'Unknown')}")
         if loan_program:
             print(f"Loan Program: {loan_program}")
         if borrower_info:
