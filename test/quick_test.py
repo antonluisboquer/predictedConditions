@@ -114,6 +114,56 @@ if __name__ == "__main__":
             verbose=True
         )
         
+        # Show latency breakdown
+        print("\n" + "="*80)
+        print("PERFORMANCE METRICS")
+        print("="*80)
+        
+        # Get step metrics from output structure
+        step_metrics = result.get('step_metrics', {})
+        
+        # Convert latency from milliseconds to seconds
+        step1_latency = step_metrics.get('step_1', {}).get('latency_ms', 0) / 1000
+        step2_latency = step_metrics.get('step_2', {}).get('latency_ms', 0) / 1000
+        step3_latency = step_metrics.get('step_3', {}).get('latency_ms', 0) / 1000
+        step4_5_latency = step_metrics.get('step_4_5', {}).get('latency_ms', 0) / 1000
+        step6_7_latency = step_metrics.get('step_6_7', {}).get('latency_ms', 0) / 1000
+        
+        # Get total latency from execution metadata
+        total_latency = result.get('execution_metadata', {}).get('total_latency_seconds', 0)
+        
+        print(f"\nLatency per step:")
+        print(f"  Step 1 (Get Compartments):    {step1_latency:>8.3f}s ({(step1_latency/total_latency*100) if total_latency > 0 else 0:>5.1f}%)")
+        print(f"  Step 2 (Hard Filter):         {step2_latency:>8.3f}s ({(step2_latency/total_latency*100) if total_latency > 0 else 0:>5.1f}%)")
+        print(f"  Step 3 (Rank Requirements):   {step3_latency:>8.3f}s ({(step3_latency/total_latency*100) if total_latency > 0 else 0:>5.1f}%)")
+        print(f"  Step 4/5 (Detect Deficiency):  {step4_5_latency:>8.3f}s ({(step4_5_latency/total_latency*100) if total_latency > 0 else 0:>5.1f}%)")
+        print(f"  Step 6/7 (Score Deficiency):   {step6_7_latency:>8.3f}s ({(step6_7_latency/total_latency*100) if total_latency > 0 else 0:>5.1f}%)")
+        print(f"  {'─'*70}")
+        print(f"  TOTAL:                         {total_latency:>8.3f}s")
+        
+        # Show token usage
+        print(f"\nToken usage:")
+        step3_tokens = step_metrics.get('step_3', {}).get('tokens', {})
+        step4_5_tokens = step_metrics.get('step_4_5', {}).get('tokens', {})
+        step6_7_tokens = step_metrics.get('step_6_7', {}).get('tokens', {})
+        
+        if step3_tokens:
+            print(f"  Step 3: {step3_tokens.get('estimated_embedding_tokens', 0)} tokens (embeddings)")
+        if step4_5_tokens:
+            input_tok = step4_5_tokens.get('input_tokens', 0)
+            output_tok = step4_5_tokens.get('output_tokens', 0)
+            cache_read = step4_5_tokens.get('cache_read_tokens', 0)
+            cache_create = step4_5_tokens.get('cache_creation_tokens', 0)
+            print(f"  Step 4/5: {input_tok:,} input, {output_tok:,} output")
+            if cache_read > 0:
+                print(f"            {cache_read:,} cache read tokens (✓ cached prompt reused!)")
+            if cache_create > 0:
+                print(f"            {cache_create:,} cache creation tokens (first run)")
+        if step6_7_tokens:
+            input_tok = step6_7_tokens.get('input_tokens', 0)
+            output_tok = step6_7_tokens.get('output_tokens', 0)
+            print(f"  Step 6/7: {input_tok:,} input, {output_tok:,} output")
+        
         # Show results summary
         print("\n" + "="*80)
         print("RESULTS SUMMARY")

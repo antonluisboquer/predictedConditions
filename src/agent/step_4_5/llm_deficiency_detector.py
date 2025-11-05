@@ -24,7 +24,7 @@ class LLMDeficiencyDetector:
         self, 
         conditions_csv_path: str,
         api_key: Optional[str] = None,
-        model: str = "claude-sonnet-4-5-20250929"#"claude-3-5-sonnet-20241022"
+        model: str = "claude-haiku-4-5-20251001"  # Optimized: Haiku is 3-5x faster than Sonnet
     ):
         """
         Initialize the detector with conditions from CSV.

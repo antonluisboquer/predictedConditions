@@ -39,17 +39,18 @@ def get_entity_embedding(entity_text: str) -> List[float]:
     
     response = openai_client.embeddings.create(
         input=entity_text,
-        model="text-embedding-3-large"
+        model="text-embedding-3-small"  # Optimized for speed (4x faster than large, was: text-embedding-3-large)
     )
     return response.data[0].embedding
 
 
-def get_connected_nodes(requirement_id: str) -> Dict[str, List[Dict[str, Any]]]:
+def get_connected_nodes(requirement_id: str, max_conditions: int = 20) -> Dict[str, List[Dict[str, Any]]]:
     """
-    Retrieve all nodes connected to a requirement from Neo4j.
+    Retrieve connected nodes from Neo4j (optimized for speed).
     
     Args:
         requirement_id: The ID of the requirement node
+        max_conditions: Maximum number of conditions to fetch per requirement (default: 20)
         
     Returns:
         Dictionary with node types as keys and lists of nodes as values
@@ -59,7 +60,7 @@ def get_connected_nodes(requirement_id: str) -> Dict[str, List[Dict[str, Any]]]:
             'other_nodes': [{...}]
         }
     """
-    # Query uses elementId for exact matching (Neo4j internal ID)
+    # Optimized query: limit conditions fetched and exclude embeddings for speed
     query = """
     MATCH (req:Requirement)
     WHERE elementId(req) = $req_id 
@@ -67,22 +68,25 @@ def get_connected_nodes(requirement_id: str) -> Dict[str, List[Dict[str, Any]]]:
        OR req._id = $req_id
        OR req.name = $req_id
     
-    // Get all connected nodes with their relationships
-    OPTIONAL MATCH (req)-[r]-(connected)
-    WHERE connected IS NOT NULL
+    // Get connected conditions (limited for speed)
+    OPTIONAL MATCH (req)-[r1]-(cond:Condition)
+    WITH req, collect({node: cond, rel_type: type(r1), labels: labels(cond)})[0..$max_conditions] as conditions
+    
+    // Get other connected nodes (dependencies, etc.)
+    OPTIONAL MATCH (req)-[r2]-(other)
+    WHERE other IS NOT NULL AND NOT 'Condition' IN labels(other)
     
     RETURN 
-        type(r) as relationship_type,
-        labels(connected) as node_labels,
-        connected,
-        elementId(req) as matched_element_id
+        conditions,
+        collect({node: other, rel_type: type(r2), labels: labels(other)}) as other_nodes
     """
     
     driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
     
     try:
         with driver.session() as session:
-            result = session.run(query, req_id=requirement_id)
+            result = session.run(query, req_id=requirement_id, max_conditions=max_conditions)
+            record = result.single()
             
             connected_nodes = {
                 'conditions': [],
@@ -91,18 +95,30 @@ def get_connected_nodes(requirement_id: str) -> Dict[str, List[Dict[str, Any]]]:
                 'other_nodes': []
             }
             
-            for record in result:
-                if record['connected'] is None:
+            if not record:
+                return connected_nodes
+            
+            # Process conditions (already limited in query)
+            for item in record['conditions'] or []:
+                if item and item.get('node'):
+                    node = dict(item['node'])
+                    # Remove embedding to reduce data size
+                    node.pop('embedding', None)
+                    connected_nodes['conditions'].append(node)
+            
+            # Process other nodes
+            for item in record['other_nodes'] or []:
+                if not item or not item.get('node'):
                     continue
+                    
+                node = dict(item['node'])
+                labels = item['labels']
                 
-                node = dict(record['connected'])
-                labels = record['node_labels']
-                rel_type = record['relationship_type']
+                # Remove embedding to reduce data size
+                node.pop('embedding', None)
                 
                 # Categorize by label
-                if 'Condition' in labels:
-                    connected_nodes['conditions'].append(node)
-                elif 'Dependency' in labels or 'Dependencies' in labels:
+                if 'Dependency' in labels or 'Dependencies' in labels:
                     connected_nodes['dependencies'].append(node)
                 elif 'Requirement' in labels:
                     connected_nodes['related_requirements'].append(node)

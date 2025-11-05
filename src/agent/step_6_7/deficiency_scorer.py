@@ -113,7 +113,7 @@ class DeficiencyScorer:
         self,
         config_path: str = "scoring_config.json",
         api_key: Optional[str] = None,
-        model: str = "claude-sonnet-4-5-20250929"
+        model: str = "claude-haiku-4-5-20251001"  # Optimized: Haiku is 3-5x faster than Sonnet
     ):
         """
         Initialize the scorer.

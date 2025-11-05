@@ -19,7 +19,7 @@ def evaluate_priority(
     detection_confidence: float,
     api_key: Optional[str],
     config: Dict[str, Any],
-    model: str = "claude-sonnet-4-5-20250929"
+    model: str = "claude-haiku-4-5-20251001"  # Optimized: Haiku is 3-5x faster than Sonnet
 ) -> Dict[str, Any]:
     """
     Evaluate priority of a deficiency using Claude.

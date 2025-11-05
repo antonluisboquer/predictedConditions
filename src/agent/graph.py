@@ -293,10 +293,10 @@ def step3_rank_requirements(state: PipelineState) -> PipelineState:
         state["step3_latency"] = time.time() - step_start
         
         # Track OpenAI embedding tokens (approximate)
-        num_embeddings = len(entity_keywords) + len(filtered_requirements)
+        num_embeddings = len(entity_keywords)  # Only entity keywords now (requirements already have embeddings)
         estimated_tokens = num_embeddings * 50  # Rough estimate
         state["step3_tokens"] = {
-            "model": "text-embedding-ada-002",
+            "model": "text-embedding-3-small",  # Optimized for speed (4x faster than large)
             "estimated_embedding_tokens": estimated_tokens
         }
         
@@ -377,7 +377,7 @@ def step4_5_detect_deficiencies(state: PipelineState) -> PipelineState:
         
         # Limit for cost efficiency and API response size
         # Note: Too many conditions can cause response truncation
-        max_conditions = 50  # Reduced from 100 to prevent token limit issues
+        max_conditions = 20  # Optimized for speed (was 50, original 100)
         if len(condition_ids) > max_conditions:
             condition_ids = condition_ids[:max_conditions]
             log_event(state, "STEP_4_5", "info", f"Limited to {max_conditions} conditions for efficiency")
@@ -504,7 +504,7 @@ def step6_7_score_deficiencies(state: PipelineState) -> PipelineState:
         # Extract token usage (if scorer uses LLM)
         metadata = final_results.get('_metadata', {})
         state["step6_7_tokens"] = {
-            "model": metadata.get('model', 'claude-sonnet-4-5'),
+            "model": metadata.get('model', 'claude-haiku-4-5-20251001'),
             "input_tokens": metadata.get('input_tokens', 0),
             "output_tokens": metadata.get('output_tokens', 0),
             "cache_read_tokens": metadata.get('cache_read_tokens', 0),
@@ -576,24 +576,84 @@ def finalize_pipeline(state: PipelineState) -> PipelineState:
 # HELPER FUNCTIONS
 # ============================================================================
 
+def _is_semantic_searchable(value: str) -> bool:
+    """
+    Determine if a value is worth doing semantic search on.
+    
+    Skip:
+    - Pure numbers (EINs, amounts, years, zip codes)
+    - Technical field names (line4, scheduleLLine17ColumnD)
+    - Very short values (< 3 chars)
+    - Field paths with dots
+    """
+    if not value or len(value) < 3:
+        return False
+    
+    # Skip if it's all digits (possibly with separators like dashes, commas, periods)
+    # Examples: "123456789", "12-3456789", "1,250,000", "2023", "90001"
+    if value.replace('-', '').replace(',', '').replace('.', '').replace(' ', '').isdigit():
+        return False
+    
+    # Skip technical field names (contain specific patterns)
+    # Examples: "line4", "line5", "scheduleLLine17ColumnD", "scheduleM1Line3B"
+    lowercase = value.lower()
+    skip_patterns = [
+        'line', 'schedule', 'form', 'part', 'column', 'row', 'section',
+        'field', 'box', 'attachment', 'worksheet'
+    ]
+    
+    # Check if value is just a technical field name (not a descriptive phrase)
+    if any(pattern in lowercase for pattern in skip_patterns):
+        # If it's short and contains these patterns, likely a field name
+        if len(value) < 30 and not ' ' in value:
+            return False
+    
+    # Skip if it contains dots (field paths like "businessAddress.city")
+    if '.' in value and not value.count('.') > 3:  # Allow descriptive sentences with periods
+        return False
+    
+    # Skip if it's camelCase or snake_case without spaces (likely field names)
+    # Examples: "typeOfBusiness", "business_name", "total_assets"
+    if '_' in value or (value[0].islower() and any(c.isupper() for c in value[1:])):
+        return False
+    
+    return True
+
+
 def _extract_entity_keywords(extracted_entities: Dict[str, Any], classification: str) -> List[str]:
-    """Extract entity keywords from document data."""
+    """
+    Extract entity keywords from document data (optimized for semantic search).
+    
+    Only extracts values worth doing semantic search on:
+    - Document classifications
+    - Business/person names
+    - Descriptive text
+    
+    Skips:
+    - Pure numbers (EINs, amounts, years)
+    - Technical field names (line4, scheduleLLine17ColumnD)
+    - Field paths (businessAddress.city)
+    """
     entities = []
     
-    if classification:
+    # Always include classification (e.g., "1120 Corporate Tax Return", "Form 1120S Scorp")
+    if classification and _is_semantic_searchable(classification):
         entities.append(classification)
     
-    # Recursively extract field names
+    # Recursively extract meaningful values
     def extract_fields(data, prefix=""):
         fields = []
         if isinstance(data, dict):
             for key, value in data.items():
-                field_name = f"{prefix}.{key}" if prefix else key
-                fields.append(field_name)
+                # Skip the key itself (usually technical field names)
+                # Only extract string values that are semantic
                 if isinstance(value, dict):
-                    fields.extend(extract_fields(value, field_name))
+                    fields.extend(extract_fields(value, key))
                 elif isinstance(value, str) and value.strip():
-                    fields.append(value.strip())
+                    clean_value = value.strip()
+                    # Only add if it's semantically meaningful
+                    if _is_semantic_searchable(clean_value):
+                        fields.append(clean_value)
         return fields
     
     if extracted_entities:
