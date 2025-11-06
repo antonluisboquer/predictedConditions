@@ -296,7 +296,7 @@ def step3_rank_requirements(state: PipelineState) -> PipelineState:
         num_embeddings = len(entity_keywords)  # Only entity keywords now (requirements already have embeddings)
         estimated_tokens = num_embeddings * 50  # Rough estimate
         state["step3_tokens"] = {
-            "model": "text-embedding-3-small",  # Optimized for speed (4x faster than large)
+            "model": "text-embedding-3-large",  # Must match Neo4j requirement embeddings
             "estimated_embedding_tokens": estimated_tokens
         }
         
@@ -856,6 +856,24 @@ def run_pipeline_with_langgraph(
         print("✅ PIPELINE COMPLETE")
         print("="*70)
         print(f"Total Latency: {final_state['total_latency']:.2f}s")
+
+        step_latency_labels = [
+            ("step1_latency", "Step 1 - Compartment Detection"),
+            ("step2_latency", "Step 2 - Hard Filter"),
+            ("step3_latency", "Step 3 - Rank Requirements"),
+            ("step4_5_latency", "Step 4/5 - Detect Deficiencies"),
+            ("step6_7_latency", "Step 6/7 - Score & Prioritize")
+        ]
+        step_latencies = [
+            (label, float(final_state.get(key, 0.0)))
+            for key, label in step_latency_labels
+            if key in final_state
+        ]
+        if step_latencies:
+            print("\n🕒 Latency Breakdown:")
+            for label, latency in step_latencies:
+                print(f"  {label}: {latency:.2f}s")
+
         print(f"Deficiencies Found: {len(final_state.get('final_results', {}).get('top_n', []))}")
         print(f"Output saved to: {output_file}")
         

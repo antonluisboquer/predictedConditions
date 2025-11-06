@@ -61,3 +61,7 @@ test/*_output.json
 
 # CSV data cleanup
 data_cleanup/
+
+# Local sample input and invocation script
+src/agent/sample_doc_input.json
+invoke_cloud.py

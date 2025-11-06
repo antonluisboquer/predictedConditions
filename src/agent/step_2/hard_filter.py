@@ -11,8 +11,11 @@ Process:
 import os
 from neo4j import GraphDatabase
 from dotenv import load_dotenv
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from openai import OpenAI
+from functools import lru_cache
+import concurrent.futures
+import time
 
 # Load environment variables
 load_dotenv()
@@ -25,6 +28,9 @@ NEO4J_PASSWORD = os.getenv('NEO4J_PASSWORD')
 # OpenAI configuration
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+# Simple in-memory embedding cache (LRU cache with 1000 entries)
+_embedding_cache = {}
 
 
 def get_requirements_by_compartment(
@@ -116,100 +122,266 @@ def get_requirements_by_compartment(
         driver.close()
 
 
-def get_entity_embedding(entity_text: str) -> List[float]:
-    """Generate embedding for an entity using OpenAI."""
+def get_entity_embedding(entity_text: str, use_cache: bool = True, model: str = "text-embedding-3-large") -> List[float]:
+    """
+    Generate embedding for an entity using OpenAI.
+    
+    Optimizations:
+    - Simple in-memory caching to avoid re-embedding same entities
+    - Uses text-embedding-3-large to match Neo4j node embeddings
+    
+    Args:
+        entity_text: The entity text to embed
+        use_cache: If True, use cached embeddings (default: True)
+        model: Embedding model to use (default: "text-embedding-3-large" to match Neo4j nodes)
+        
+    Returns:
+        Embedding vector as list of floats
+    """
     if not openai_client:
         raise ValueError("OpenAI API key not configured")
     
+    # Check cache first
+    cache_key = f"{model}:{entity_text}"
+    if use_cache and cache_key in _embedding_cache:
+        return _embedding_cache[cache_key]
+    
     response = openai_client.embeddings.create(
         input=entity_text,
-        model="text-embedding-3-large"
+        model=model
     )
-    return response.data[0].embedding
+    embedding = response.data[0].embedding
+    
+    # Cache the result (limit cache size to prevent memory issues)
+    if use_cache:
+        if len(_embedding_cache) > 1000:
+            # Clear oldest entries (simple FIFO)
+            _embedding_cache.clear()
+        _embedding_cache[cache_key] = embedding
+    
+    return embedding
+
+
+def get_entity_embeddings_batch(entities: List[str], model: str = "text-embedding-3-large") -> Dict[str, List[float]]:
+    """
+    Generate embeddings for multiple entities in a single batch API call.
+    
+    This is MUCH faster than sequential calls - OpenAI supports up to 2048 inputs per batch.
+    
+    Args:
+        entities: List of entity texts to embed
+        model: Embedding model to use (default: "text-embedding-3-large" to match Neo4j nodes)
+        
+    Returns:
+        Dictionary mapping entity text to embedding vector
+    """
+    if not openai_client:
+        raise ValueError("OpenAI API key not configured")
+    
+    if not entities:
+        return {}
+    
+    # Check cache for entities we already have
+    cached = {}
+    uncached_entities = []
+    for entity in entities:
+        cache_key = f"{model}:{entity}"
+        if cache_key in _embedding_cache:
+            cached[entity] = _embedding_cache[cache_key]
+        else:
+            uncached_entities.append(entity)
+    
+    # Batch embed uncached entities
+    if uncached_entities:
+        try:
+            response = openai_client.embeddings.create(
+                input=uncached_entities,
+                model=model
+            )
+            
+            # Store in cache and return dict
+            for i, entity in enumerate(uncached_entities):
+                cache_key = f"{model}:{entity}"
+                embedding = response.data[i].embedding
+                cached[entity] = embedding
+                
+                # Update cache
+                if len(_embedding_cache) > 1000:
+                    _embedding_cache.clear()
+                _embedding_cache[cache_key] = embedding
+        except Exception as e:
+            print(f"    ⚠️  Batch embedding failed: {e}")
+            # Fallback to individual calls
+            for entity in uncached_entities:
+                try:
+                    cached[entity] = get_entity_embedding(entity, use_cache=True, model=model)
+                except Exception as e2:
+                    print(f"    ⚠️  Failed to embed '{entity}': {e2}")
+    
+    return cached
+
+
+def _query_requirements_for_entity(
+    driver,
+    entity: str,
+    entity_embedding: List[float],
+    top_k: int,
+    similarity_threshold: float
+) -> List[Dict[str, Any]]:
+    """
+    Helper function to query requirements for a single entity.
+    Used for parallel execution. Creates its own session (thread-safe).
+    """
+    requirements = []
+    
+    # Optimized query: Try to use vector index if available, otherwise fallback
+    # This query is more efficient than scanning all nodes
+    query = """
+    MATCH (n)
+    WHERE n.embedding IS NOT NULL
+    WITH n, 
+         gds.similarity.cosine(n.embedding, $entity_embedding) AS similarity
+    WHERE similarity >= $threshold
+    ORDER BY similarity DESC
+    LIMIT $top_k
+    WITH n
+    MATCH (n)-[*1..2]-(req:Requirement)
+    RETURN DISTINCT req
+    """
+    
+    # Create a new session for this thread (Neo4j sessions are not thread-safe)
+    with driver.session() as session:
+        try:
+            result = session.run(
+                query,
+                entity_embedding=entity_embedding,
+                threshold=similarity_threshold,
+                top_k=top_k
+            )
+            
+            for record in result:
+                req_node = record['req']
+                req_dict = dict(req_node)
+                req_dict['_element_id'] = req_node.element_id
+                requirements.append(req_dict)
+        except Exception as e:
+            print(f"    ⚠️  Query failed for '{entity}': {e}")
+    
+    return requirements
 
 
 def get_requirements_by_semantic_search(
     entities: List[str],
     top_k: int = 20,
-    similarity_threshold: float = 0.5  # Lowered from 0.7 to 0.5 (50% similarity)
+    similarity_threshold: float = 0.5,
+    use_batch_embeddings: bool = True,
+    use_parallel_queries: bool = True,
+    embedding_model: str = "text-embedding-3-large"
 ) -> List[Dict[str, Any]]:
     """
-    Path B: Get requirements via semantic search on entities.
+    Path B: Get requirements via semantic search on entities (OPTIMIZED).
+    
+    Optimizations:
+    1. Batch embedding generation (single API call for all entities)
+    2. Parallel Neo4j queries (process multiple entities concurrently)
+    3. In-memory embedding cache
+    4. Uses text-embedding-3-large to match Neo4j node embeddings
     
     Process:
-    1. For each entity, generate embedding
-    2. Find all nodes in DB similar to entity (using embeddings)
-    3. Get Requirement nodes connected to those similar nodes
-    4. Collate all unique requirements
+    1. Generate embeddings for all entities in one batch
+    2. Query Neo4j in parallel for each entity
+    3. Collate all unique requirements
     
     Args:
         entities: List of entity texts from input document
         top_k: How many similar nodes to find per entity
         similarity_threshold: Minimum similarity score (0-1)
+        use_batch_embeddings: If True, batch all embeddings in one API call (default: True)
+        use_parallel_queries: If True, run Neo4j queries in parallel (default: True)
+        embedding_model: Embedding model to use (default: "text-embedding-3-large" to match Neo4j nodes)
         
     Returns:
         List of unique requirement nodes found via semantic search
     """
+    if not entities:
+        return []
+    
     all_requirements = []
     seen_req_ids = set()
+    
+    # OPTIMIZATION 1: Batch generate all embeddings at once
+    start_time = time.time()
+    if use_batch_embeddings:
+        entity_embeddings_dict = get_entity_embeddings_batch(entities, model=embedding_model)
+        embedding_time = time.time() - start_time
+        print(f"    ✓ Batch embedded {len(entities)} entities in {embedding_time:.2f}s")
+    else:
+        # Fallback to sequential (slower)
+        entity_embeddings_dict = {}
+        for entity in entities:
+            try:
+                entity_embeddings_dict[entity] = get_entity_embedding(entity, model=embedding_model)
+            except Exception as e:
+                print(f"    ⚠️  Failed to get embedding for '{entity}': {e}")
+    
+    if not entity_embeddings_dict:
+        return []
     
     driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
     
     try:
-        with driver.session() as session:
-            for entity in entities:
-                # Generate embedding for entity
-                try:
-                    entity_embedding = get_entity_embedding(entity)
-                except Exception as e:
-                    print(f"    ⚠️  Failed to get embedding for '{entity}': {e}")
-                    continue
+        # OPTIMIZATION 2: Parallel Neo4j queries
+        if use_parallel_queries and len(entities) > 1:
+            # Use ThreadPoolExecutor for parallel queries
+            # Each thread gets its own session (Neo4j sessions are not thread-safe)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(entities), 5)) as executor:
+                # Submit all queries
+                future_to_entity = {
+                    executor.submit(
+                        _query_requirements_for_entity,
+                        driver,  # Pass driver, not session (each thread creates its own session)
+                        entity,
+                        entity_embeddings_dict[entity],
+                        top_k,
+                        similarity_threshold
+                    ): entity
+                    for entity in entity_embeddings_dict.keys()
+                }
                 
-                # Find similar nodes and their connected Requirements
-                query = """
-                MATCH (n)
-                WHERE n.embedding IS NOT NULL
-                WITH n, 
-                     gds.similarity.cosine(n.embedding, $entity_embedding) AS similarity
-                WHERE similarity >= $threshold
-                ORDER BY similarity DESC
-                LIMIT $top_k
-                WITH n
-                MATCH (n)-[*1..2]-(req:Requirement)
-                RETURN DISTINCT req
-                """
-                
-                try:
-                    result = session.run(
-                        query,
-                        entity_embedding=entity_embedding,
-                        threshold=similarity_threshold,
-                        top_k=top_k
+                # Collect results as they complete
+                for future in concurrent.futures.as_completed(future_to_entity):
+                    entity = future_to_entity[future]
+                    try:
+                        reqs = future.result()
+                        count = 0
+                        for req_dict in reqs:
+                            req_id = req_dict.get('id') or str(req_dict)
+                            if req_id not in seen_req_ids:
+                                seen_req_ids.add(req_id)
+                                all_requirements.append(req_dict)
+                                count += 1
+                        print(f"    '{entity}': Found {count} requirement(s)")
+                    except Exception as e:
+                        print(f"    ⚠️  Error processing '{entity}': {e}")
+        else:
+            # Sequential processing (fallback)
+            with driver.session() as session:
+                for entity, entity_embedding in entity_embeddings_dict.items():
+                    reqs = _query_requirements_for_entity(
+                        driver,  # Pass driver for consistency
+                        entity,
+                        entity_embedding,
+                        top_k,
+                        similarity_threshold
                     )
-                    
                     count = 0
-                    # Collect unique requirements
-                    for record in result:
-                        req_node = record['req']
-                        req_dict = dict(req_node)
-                        # Add the Neo4j element ID for later use
-                        req_dict['_element_id'] = req_node.element_id
+                    for req_dict in reqs:
                         req_id = req_dict.get('id') or str(req_dict)
-                        
                         if req_id not in seen_req_ids:
                             seen_req_ids.add(req_id)
                             all_requirements.append(req_dict)
                             count += 1
-                    
                     print(f"    '{entity}': Found {count} requirement(s)")
-                    
-                except Exception as e:
-                    print(f"    ⚠️  Query failed for '{entity}': {e}")
-                    print(f"    💡 This might mean:")
-                    print(f"       - Neo4j GDS plugin not installed (for gds.similarity.cosine)")
-                    print(f"       - Nodes don't have 'embedding' property")
-                    print(f"       - No relationship path to Requirement nodes")
-                    continue
         
         return all_requirements
     finally:
@@ -222,7 +394,10 @@ def hard_filter(
     loan_program: str = None,
     verbose: bool = True,
     similarity_threshold: float = 0.5,
-    top_k: int = 20
+    top_k: int = 20,
+    use_batch_embeddings: bool = True,
+    use_parallel_queries: bool = True,
+    embedding_model: str = "text-embedding-3-large"
 ) -> List[Dict[str, Any]]:
     """
     Main Step 2 function: Hard filter requirements.
@@ -240,6 +415,9 @@ def hard_filter(
         similarity_threshold: Minimum similarity score (0-1). Default 0.5 (50%)
                              Lower = more results, Higher = stricter matching
         top_k: How many similar nodes to find per entity. Default 20
+        use_batch_embeddings: If True, batch all embeddings in one API call (much faster). Default True
+        use_parallel_queries: If True, run Neo4j queries in parallel. Default True
+        embedding_model: Embedding model to use. Default "text-embedding-3-large" (must match Neo4j node embeddings)
         
     Returns:
         List of requirement nodes that match BOTH compartment AND entities.
@@ -301,18 +479,24 @@ def hard_filter(
                 print(f"    {i}. {req_name[:60]}")
                 print(f"       └─ Program(s): {programs_str}")
     
-    # Path B: Semantic search on entities
+    # Path B: Semantic search on entities (OPTIMIZED)
     if verbose:
         print(f"\n{'─'*70}")
-        print("Path B: Semantic Entity Search")
+        print("Path B: Semantic Entity Search (OPTIMIZED)")
         print(f"  Similarity threshold: {similarity_threshold} (lower = more results)")
         print(f"  Top-k per entity: {top_k}")
+        print(f"  Batch embeddings: {use_batch_embeddings}")
+        print(f"  Parallel queries: {use_parallel_queries}")
+        print(f"  Embedding model: {embedding_model}")
         print('─'*70)
     
     reqs_by_entities = get_requirements_by_semantic_search(
         entities,
         top_k=top_k,
-        similarity_threshold=similarity_threshold
+        similarity_threshold=similarity_threshold,
+        use_batch_embeddings=use_batch_embeddings,
+        use_parallel_queries=use_parallel_queries,
+        embedding_model=embedding_model
     )
     
     if verbose:

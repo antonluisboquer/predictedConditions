@@ -39,7 +39,7 @@ def get_entity_embedding(entity_text: str) -> List[float]:
     
     response = openai_client.embeddings.create(
         input=entity_text,
-        model="text-embedding-3-small"  # Optimized for speed (4x faster than large, was: text-embedding-3-large)
+        model="text-embedding-3-large"  # Must match Neo4j requirement embeddings for proper similarity
     )
     return response.data[0].embedding
 
