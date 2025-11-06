@@ -16,17 +16,22 @@ from confidence_calculator import calculate_detection_confidence, load_config
 from priority_evaluator import evaluate_priority
 
 
-def extract_relevant_documents(actionable_instruction: str, related_documents: str) -> str:
+def extract_relevant_documents(actionable_instruction: str, related_documents: str, documents_checked: List[str] = None) -> str:
     """
     Extract relevant documents from related_documents based on keywords in actionable_instruction.
     
     Args:
         actionable_instruction: The actionable instruction text (e.g., "Provide K-1 or CPA letter")
         related_documents: Comma-separated list of related documents
+        documents_checked: List of documents that were checked (used as fallback if related_documents is empty)
         
     Returns:
         Filtered comma-separated list of documents that match the instruction
     """
+    # If no related_documents but we have documents_checked, use those as fallback
+    if not related_documents and documents_checked:
+        related_documents = ', '.join(documents_checked)
+    
     if not actionable_instruction or not related_documents:
         return related_documents
     
@@ -257,7 +262,8 @@ class DeficiencyScorer:
         # Extract actionable documents from related documents
         related_docs = deficiency_result.get("related_documents", "")
         actionable_inst = deficiency_result.get("actionable_instruction", "")
-        actionable_docs = extract_relevant_documents(actionable_inst, related_docs)
+        docs_checked = deficiency_result.get("documents_checked", [])
+        actionable_docs = extract_relevant_documents(actionable_inst, related_docs, docs_checked)
         
         # Combine into output format
         return {

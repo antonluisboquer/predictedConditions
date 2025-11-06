@@ -16,76 +16,274 @@ sys.path.insert(0, str(agent_path))
 from graph import run_pipeline_with_langgraph
 
 
-# Test case: Tax Return + K-1 (cross-document resolution)
+# Test case: W2 borrower with URLA 1003 unsigned (tests actionable_documents fix)
 test_input = {
     "borrower_info": {
-        "borrower_type": "Self-Employed",
-        "business_name": "Sunrise Trading Corporation",
-        "email": "miguel.santos@email.com",
-        "first_name": "Miguel",
-        "last_name": "Santos",
-        "middle_name": "R.",
-        "phone_number": "(0917) 555-3829",
-        "ssn": "123-45-6789"
+        "borrower_type": "W2",
+        "first_name": "Ramin",
+        "last_name": "Dailamy"
     },
-    "loan_program": "Flex Supreme",
+    "loan_program": "Flex Select",
     "documents": [
         {
-            "classification": "1120 Corporate Tax Return",
+            "classification": "Borrower Certification as to Business Purpose",
             "extracted_entities": {
-                "business_name": "Sunrise Trading Corporation",
-                "ein": "12-3456789",
-                "gross_receipts": "1,250,000",
-                "net_income": "185,000",
-                "tax_year": "2023",
-                "total_assets": "750,000",
-                "total_liabilities": "420,000"
+                "borrowers": [
+                    {
+                        "signed": True,
+                        "suffix": "",
+                        "lastName": "Delgado",
+                        "firstName": "Marisol",
+                        "dateSigned": "2025-11-04",
+                        "middleName": ""
+                    }
+                ],
+                "propertyAddress": {
+                    "city": "Riverside",
+                    "state": "California",
+                    "zipCode": "92501-2932",
+                    "address1": "3311 LIME ST",
+                    "address2": "",
+                    "fullAddress": ""
+                }
             }
         },
         {
-            "classification": "Form 1120S Scorp",
+            "classification": "Bank Statement",
             "extracted_entities": {
-                "year": 2023,
-                "SCorporation": {
-                    "name": "Sunrise Trading Corporation",
-                    "EIN": "123456789"
+                "bank": {
+                    "name": "CITI BANK N.A"
                 },
-                "businessAddress": {
-                    "address1": "123 Main Street",
+                "accounts": [
+                    {
+                        "accountType": "Checking",
+                        "accountNumber": "42029260439",
+                        "endingBalance": "10985.99",
+                        "accountHolderTypes": ["", "person"],
+                        "accountHolderTrusts": [],
+                        "accountHolderPersons": [
+                            {
+                                "suffix": "",
+                                "lastName": "DAILAMY",
+                                "firstName": "RAMIN",
+                                "middleName": ""
+                            }
+                        ],
+                        "accountHolderBusinesses": [],
+                        "hasLargeDepositWithdrawal": True
+                    },
+                    {
+                        "accountType": "Savings",
+                        "accountNumber": "42029260447",
+                        "endingBalance": "175.66",
+                        "accountHolderTypes": ["", "person"],
+                        "accountHolderTrusts": [],
+                        "accountHolderPersons": [
+                            {
+                                "suffix": "",
+                                "lastName": "DAILAMY",
+                                "firstName": "RAMIN",
+                                "middleName": ""
+                            }
+                        ],
+                        "accountHolderBusinesses": [],
+                        "hasLargeDepositWithdrawal": False
+                    }
+                ],
+                "statementAddress": {
+                    "city": "WEST HILLS",
+                    "state": "CA",
+                    "zipCode": "91307-1425",
+                    "address1": "23360 SANDALWOOD ST",
+                    "address2": "",
+                    "fullAddress": ""
+                },
+                "statementPeriodTo": "2025-08-31",
+                "statementPeriodFrom": "2025-08-01"
+            }
+        },
+        {
+            "classification": "Title Invoice",
+            "extracted_entities": {
+                "borrowers": [
+                    {
+                        "lastName": "Rocco",
+                        "firstName": "Francis",
+                        "middleName": "",
+                        "suffix": "",
+                        "dateSigned": "",
+                        "signed": False
+                    }
+                ]
+            }
+        },
+        {
+            "classification": "Credit Report",
+            "extracted_entities": {
+                "alerts": [],
+                "scores": [],
+                "address": {
                     "city": "Los Angeles",
                     "state": "California",
-                    "zipCode": "90001"
+                    "zipCode": "91307",
+                    "address1": "23360 Sandalwood Street",
+                    "address2": "",
+                    "fullAddress": ""
                 },
-                "typeOfBusiness": "Trading",
-                "line4": 1250000,
-                "line5": 850000,
-                "line14": 185000,
-                "line15": 165000,
-                "form1125E": [
+                "company": {
+                    "name": "XACTUS"
+                },
+                "inquiries": [],
+                "applicant1": {
+                    "suffix": "",
+                    "last4SSN": "4801",
+                    "lastName": "Dailamy",
+                    "firstName": "Ramin",
+                    "middleName": ""
+                },
+                "applicant2": {
+                    "suffix": "",
+                    "last4SSN": "",
+                    "lastName": "",
+                    "firstName": "",
+                    "middleName": ""
+                },
+                "reportIssued": "2025-09-16",
+                "tradeSummary": [],
+                "publicRecords": [],
+                "mortgageSummary": [],
+                "creditTradeLines": [],
+                "derogatorySummary": [],
+                "collectionAccounts": [],
+                "derogatoryAccounts": [],
+                "aliasesAndAddresses": []
+            }
+        },
+        {
+            "classification": "URLA 1003",
+            "extracted_entities": {
+                "a": "",
+                "b": "",
+                "c": "",
+                "d": "",
+                "e": "",
+                "f": "",
+                "g": "",
+                "h": "",
+                "i": "",
+                "j": "",
+                "k": "",
+                "l": "",
+                "m": "",
+                "cost": 0,
+                "banks": [],
+                "total": 0,
+                "amount": 0,
+                "signed": False,
+                "retired": False,
+                "employer": {
+                    "name": ""
+                },
+                "position": "",
+                "borrowers": [
                     {
-                        "officer": {
-                            "firstName": "Miguel",
-                            "middleName": "R",
-                            "lastName": "Santos",
-                            "last4SSN": "6789"
+                        "DOB": "",
+                        "signed": False,
+                        "status": "",
+                        "suffix": "",
+                        "last4SSN": "",
+                        "lastName": "DAILAMY",
+                        "position": "",
+                        "firstName": "RAMIN",
+                        "homePhone": "",
+                        "yrsSchool": "",
+                        "dateSigned": "",
+                        "middleName": "",
+                        "mailingAddress": {
+                            "city": "",
+                            "state": "",
+                            "zipCode": "",
+                            "address1": "",
+                            "address2": "",
+                            "fullAddress": ""
                         },
-                        "percentStockOwned": 75,
-                        "amountOfCompensation": 120000
+                        "presentAddress": {
+                            "city": "",
+                            "noYrs": 0,
+                            "state": "",
+                            "zipCode": "",
+                            "address1": "",
+                            "address2": "",
+                            "noMonths": 0,
+                            "ownOrRent": "",
+                            "fullAddress": ""
+                        },
+                        "formerAddresses": []
                     }
                 ],
-                "scheduleGPartII": [
-                    {
-                        "individual": {
-                            "firstName": "Miguel",
-                            "middleName": "R",
-                            "lastName": "Santos",
-                            "last4SSN": "6789"
-                        },
-                        "percentageOwned": 75
-                    }
-                ],
-                "scheduleLLine17ColumnD": 750000,
-                "scheduleM1Line3B": 15000
+                "startDate": "",
+                "employedBy": False,
+                "noOfMonths": "",
+                "properties": [],
+                "coBorrowerA": "",
+                "coBorrowerB": "",
+                "coBorrowerC": "",
+                "coBorrowerD": "",
+                "coBorrowerE": "",
+                "coBorrowerF": "",
+                "coBorrowerG": "",
+                "coBorrowerH": "",
+                "coBorrowerI": "",
+                "coBorrowerJ": "",
+                "coBorrowerK": "",
+                "coBorrowerL": "",
+                "coBorrowerM": "",
+                "liabilities": [],
+                "interestRate": 0,
+                "originalCost": 0,
+                "selfEmployed": False,
+                "yrsOnThisJob": {
+                    "years": 0,
+                    "months": 0
+                },
+                "borrowerGross": [],
+                "businessPhone": "",
+                "purposeOfLoan": "",
+                "madeOrToBeMade": "",
+                "ownershipShare": "",
+                "propertyWillBe": "",
+                "propertyAddress": {
+                    "TBD": False,
+                    "city": "CALABASAS",
+                    "state": "CA",
+                    "zipCode": "91302",
+                    "address1": "23675 PARK CAPRI",
+                    "address2": "",
+                    "fullAddress": ""
+                },
+                "yearLotAcquired": 0,
+                "amortizationType": "",
+                "new1003Borrowers": [],
+                "addressOfEmployer": {
+                    "city": "",
+                    "state": "",
+                    "zipCode": "",
+                    "address1": "",
+                    "address2": "",
+                    "fullAddress": ""
+                },
+                "presentValueOfLot": 0,
+                "signed1003Version": "",
+                "costOfImprovements": 0,
+                "mortgageAppliedFor": "",
+                "purposeOfRefinance": "",
+                "amountExistingLiens": 0,
+                "sourceOfDownPayment": "",
+                "describeImprovements": "",
+                "titleWillBeHeldInWhatNames": [],
+                "borrowerPreviousEmployments": [],
+                "yrsEmployedInThisLineOfWork": "",
+                "mannerInWhichTitleWillBeHeld": ""
             }
         }
     ]
@@ -94,7 +292,7 @@ test_input = {
 
 if __name__ == "__main__":
     print("\n" + "="*80)
-    print("QUICK TEST: Multi-Document Agent (Cross-Document Resolution)")
+    print("QUICK TEST: Multi-Document Agent (actionable_documents fix)")
     print("="*80 + "\n")
     
     # Save test input
